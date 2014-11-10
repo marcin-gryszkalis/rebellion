@@ -12,7 +12,8 @@ use WWW::Curl::Easy;
 use WWW::Curl::Form;
 
 use threads (
-     'stack_size' => 32*4096,
+    # override with env. PERL5_ITHREADS_STACK_SIZE
+     'stack_size' => 64*1024, # 128 was to much for 300 browsers on x61
      'exit' => 'threads_only',
      );
 
@@ -107,7 +108,7 @@ print "Usage: rebellion.pl [-hV] [-l log file] -c config-file
 ";
 }
 
-getopts('c:hl:Vbdop:');
+getopts('c:hl:Vbdop:a');
 if ($opt_h) { HELP_MESSAGE(); exit; }
 if ($opt_V) { VERSION_MESSAGE(); exit; }
 if ($opt_d) { $DEBUG_NO_DELAY = 1; }
@@ -585,7 +586,13 @@ sub verification_log($$$)
     print V "<h2>$vnow</h2><hr>\n";
     print V "<h2>$reason [thread $fox->{id} at line $fox->{line}]</h2><hr>\n";
     print V "<pre style='font-size: 10px;'>\n".(Dumper $fox), "\n</pre>\n<hr>\n";
-    print V "<pre style='font-size: 10px;'>\n$headers\n</pre>\n<hr>\n";
+    print V "<pre style='font-size: 10px; white-space: pre-wrap; '>\n$headers\n</pre>\n<hr>\n";
+
+    # disable popup escape
+    #    if(top!=self)top.location.href=location.href;
+    #    if (top === self){window.location = '/'; }
+    $body =~ s/top[ !=]+self/false/g;
+
     print V $body;
 
     close(V);
@@ -1326,7 +1333,7 @@ open($devnull, ">/dev/null") or die("cannot open /dev/null for write");
 my $th_sparky = threads->create({'stack_size' => 128*4096},\&thread_sparky); # just for case - bigger stack_size
 $queue_re->dequeue(); # wait for sparky's confirmation
 sleep(1); # allow time for sparky setup
-MSG $VERSION;
+MSG "Rebellion v$VERSION";
 sleep(1);
 
 # === read config =============================================================
