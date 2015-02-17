@@ -12,8 +12,7 @@ use WWW::Curl::Easy;
 use WWW::Curl::Form;
 
 use threads (
-    # override with env. PERL5_ITHREADS_STACK_SIZE
-     'stack_size' => 64*1024, # 128 was to much for 300 browsers on x61
+     'stack_size' => 32*4096, # override with env. PERL5_ITHREADS_STACK_SIZE
      'exit' => 'threads_only',
      );
 
@@ -660,6 +659,10 @@ sub thread_rebel
     my $skippages_active = 0;
     my $skippages_skipto = undef;
 
+    my $verifyuntiltry = 0;
+    my $verifyuntillasturl = undef;
+    my $verifyuntilredo = 0;
+    my @verifyuntilstack = ();
     while (1)
     {
 
@@ -684,6 +687,9 @@ sub thread_rebel
 
         next if ($skippages_active and $sline->{k} ne 'page');
 
+        push(@verifyuntilstack, { %$sline });
+
+print "VU-STACK:", Dumper \@verifyuntilstack;
         if ($sline->{k} eq 'skipto')
         {
             if ($sline->{v} eq 'END')
@@ -765,6 +771,70 @@ sub thread_rebel
             }
             next;
         }
+
+        if ($sline->{k} eq 'verify_until') # verify_until max-count delay pattern
+        {
+            if (not defined $fox->{body})
+            {
+                MSG "REBEL($fox->{id}:$fox->{line}:$vlv):ERROR:Verification Failed - body empty";
+                verification_log($fox, "body empty", $vlvx);
+                $fox = reset_scenario($fox);
+                next;
+            }
+
+            my @vline = split(/\s+/, $sline->{v}, 2); 
+            my $vmaxtry = $vline[0];
+            my $patt = $vline[1];
+
+            my $verify = ($fox->{body} =~ m!$patt!s);
+
+            if (not $verify)
+            {
+                $verifyuntiltry++; # resetted at page= 
+                if ($verifyuntiltry > $vmaxtry)
+                {
+                    MSG "REBEL($fox->{id}:$fox->{line}:$vlv):VERIFYUNTIL:Try limit exceeded ($patt)";
+                    verification_log($fox,"verification:$patt", $vlvx);
+                    $fox = reset_scenario($fox);
+                    next;
+                }
+
+                MSG "REBEL($fox->{id}:$fox->{line}:$vlv):VERIFYUNTIL:Verification Failed ($patt) - try $verifyuntiltry/$vmaxtry";
+
+                # add delay, redo url and verify_until
+
+                while (my $sx = pop @verifyuntilstack)
+                {
+                    my $sxx = { %$sx };
+                    MSG "unshift: ".Dumper($sxx);
+                    unshift(@scenario, $sxx);
+                }
+
+#                my $sc3;
+#                $sc3->{k} = 'delay';
+#                $sc3->{v} = "$vdelay $vdelay";
+#                $sc3->{line} = "$fox->{line}-vuredo-delay";
+#                unshift(@scenario, $sc3);
+
+#                MSG "unshift: ".Dumper($sxx);
+
+#                my $sc1;
+#                $sc1->{k} = 'verify_until';
+#                $sc1->{v} = $sline->{v};
+#                $sc1->{line} = "$fox->{line}";
+#                unshift(@scenario, $sc1);
+
+#                my $sc2;
+#                $sc2->{k} = 'url';
+#                $sc2->{v} = $verifyuntillasturl;
+#                $sc2->{line} = "$fox->{line}-vuredo-url";
+#                unshift(@scenario, $sc2);
+
+            }
+
+            next;
+        }
+
 
         if ($sline->{k} eq 'var' || $sline->{k} =~ /^var\@(\d+)$/)
         {
@@ -896,31 +966,6 @@ sub thread_rebel
             }
         }
 
-        # if not var or verify then remove page from memory
-        $fox->{body} = undef;
-        close($body_h) if defined $body_h;
-
-        if ($sline->{k} eq 'base')
-        {
-            $fox->{base} = $sline->{v};
-            LOG "REBEL($fox->{id}:$fox->{line}):BASE($fox->{base})";
-            next;
-        }
-
-        if ($sline->{k} eq 'fallback')
-        {
-            $fox->{fallback} = $sline->{v};
-            LOG "REBEL($fox->{id}:$fox->{line}):FALLBACK($fox->{fallback})";
-            next;
-        }
-
-        if ($sline->{k} eq 'define')
-        {
-            my @v = split/\s+/, $sline->{v}, 2;
-            $fox->{variables}->{$v[0]} = $v[1];
-            next;
-        }
-
         if ($sline->{k} eq 'delay')
         {
             my @v = ();
@@ -952,8 +997,38 @@ sub thread_rebel
             next;
         }
 
+
+        # if not var or verify then remove page from memory, 
+        # delay is used with verify_until so it's needed too
+        $fox->{body} = undef;
+        close($body_h) if defined $body_h;
+
+        if ($sline->{k} eq 'base')
+        {
+            $fox->{base} = $sline->{v};
+            LOG "REBEL($fox->{id}:$fox->{line}):BASE($fox->{base})";
+            next;
+        }
+
+        if ($sline->{k} eq 'fallback')
+        {
+            $fox->{fallback} = $sline->{v};
+            LOG "REBEL($fox->{id}:$fox->{line}):FALLBACK($fox->{fallback})";
+            next;
+        }
+
+        if ($sline->{k} eq 'define')
+        {
+            my @v = split/\s+/, $sline->{v}, 2;
+            $fox->{variables}->{$v[0]} = $v[1];
+            next;
+        }
+
         if ($sline->{k} eq 'page')
         {
+            $verifyuntiltry = 0; # reset counter for page
+            @verifyuntilstack = ();
+
             $sline->{v} =~ s/^\s+//;
             $sline->{v} =~ s/\s+$//;
             $sline->{v} =~ s/\s+/ /;
@@ -992,7 +1067,8 @@ sub thread_rebel
             $fox->{status} = $sline->{k};
             $status[$id] = $sline->{k};
 
-            my $url = $sline->{v};
+            my $url = $verifyuntillasturl = $sline->{v};
+
             my $post = undef;
             my $upload = undef;
             my $curlf = undef;
