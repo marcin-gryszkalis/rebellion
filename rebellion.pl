@@ -35,7 +35,6 @@ my $DEBUG_ALWAYS_SAVE_VERIFICATION_LOG = 0;
 my %cfg = (
     logfile => './sparky.log',
     sparkytee => 0,
-    startdelay => 1,
     scenario => undef,
     skippages => undef,
     duration => 60,
@@ -647,11 +646,11 @@ sub thread_rebel
     $curl->setopt(CURLOPT_HEADER,1);
     $curl->setopt(CURLOPT_URL, '');
 
-    my $start_delay = int(rand($cfg{startdelay})+1);
+    my $leading_delay =  int(rand($cfg{leading_delay} * $cfg{browsers})+1);
 
-    LOG "REBEL($id:X) Start (delay: $start_delay)";
+    LOG "REBEL($id:X) Start (delay: $leading_delay)";
     $queue_re->enqueue($id);
-    sleep($start_delay);
+    sleep($leading_delay);
 
 
 
@@ -689,7 +688,7 @@ sub thread_rebel
 
         push(@verifyuntilstack, { %$sline });
 
-print "VU-STACK:", Dumper \@verifyuntilstack;
+# print "VU-STACK:", Dumper \@verifyuntilstack;
         if ($sline->{k} eq 'skipto')
         {
             if ($sline->{v} eq 'END')
@@ -806,7 +805,7 @@ print "VU-STACK:", Dumper \@verifyuntilstack;
                 while (my $sx = pop @verifyuntilstack)
                 {
                     my $sxx = { %$sx };
-                    MSG "unshift: ".Dumper($sxx);
+                    ## MSG "unshift: ".Dumper($sxx);
                     unshift(@scenario, $sxx);
                 }
 
@@ -1596,7 +1595,7 @@ while (1)
     }
 
     # finish dead bodies
-    while ($war_is_over && $live_rebels > 0)
+    if ($war_is_over && $live_rebels > 0)
     {
         MSG "REBELLION:burying dead bodies ($live_rebels left)";
         for my $r (@th_rebels)
@@ -1607,7 +1606,6 @@ while (1)
                 $live_rebels--;
             }
         }
-        sleep(1);
     }
 
     last if $live_rebels == 0;
