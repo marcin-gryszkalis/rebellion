@@ -24,6 +24,7 @@ use Thread::Queue;
 # use Event::Lib;
 use Data::Dumper;
 use URI::Escape;
+use HTML::Entities;
 use File::Slurp;
 
 my $DEBUG_NO_BURL = 0;
@@ -49,10 +50,12 @@ my @round :shared;
 my $gen_dowod_prefix = 'BBD';
 my $gen_dowod_seed :shared = 0;
 
+my $global_rawpost_data = undef;
 
 my $rebels = 0;
 
 my @def_headers = ();
+my $def_headers_h;
 my %def_variables = ();
 my $def_variables_per_fox;
 my @def_verifynegs = ();
@@ -310,6 +313,67 @@ sub gen_vin
     return sprintf("TMBAH6NH8%08d", int rand(99999999))
 }
 
+sub process_generators
+{
+    my $url = shift;
+
+    $url  =~ s/{:TEXT\((\d+)\)}/gen_random_text($1)/ge;
+
+    $url  =~ s/{:NUMBER\((\d+),(\d+)\)}/gen_random_number($1,$2)/ge;
+
+    $url  =~ s/{:FIRSTNAME}/gen_firstname()/ge;
+
+    $url  =~ s/{:LASTNAME}/gen_lastname()/ge;
+
+    $url  =~ s/{:LIST\((\S+?)\)}/gen_list($1)/ge;
+
+    $url  =~ s/{:PESEL}/gen_pesel()/ge;
+
+    $url  =~ s/{:DATE_FROM_LAST_PESEL}/gen_date_from_last_pesel()/ge;
+
+    $url  =~ s/{:VIN}/gen_vin()/ge;
+
+    $url  =~ s/{:ZIPCODE}/gen_zipcode()/ge;
+
+    $url  =~ s/{:CITY}/gen_city()/ge;
+
+    $url  =~ s/{:EMAIL}/gen_email()/ge;
+
+    $url  =~ s/{:DOWOD}/gen_dowod()/ge;
+
+    my $v = uri_escape(strftime("%F", localtime));
+    $url =~ s/{:DATE}/$v/g;
+
+    $v = uri_escape(strftime("%T", localtime));
+    $url =~ s/{:TIME}/$v/g;
+
+    $v = uri_escape(strftime("%F %T", localtime));
+    $url =~ s/{:DATETIME}/$v/g;
+
+    $v = time();
+    $url =~ s/{:UNIXTIME}/$v/g;
+
+    return $url;
+}
+
+my $mimecache;
+sub check_mime($)
+{
+    my $b = shift;
+    my $mt = undef;
+    if (exists $mimecache->{$b})
+    {
+        $mt = $mimecache->{$b};
+    } 
+    else
+    {
+        $mt = `file --mime-type --brief '$b'` || 'text/plain';
+        chomp $mt;
+        $mimecache->{$b} = $mt;
+    }
+
+    return $mt;
+}
 # =============================================================================
 # xxx REBELS xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # =============================================================================
@@ -427,7 +491,7 @@ sub reset_scenario($)
 
     LOG "REBEL($fox->{id}:$fox->{line}):RESET SCENARIO";
 
-    if (exists $fox->{fallback}) # mostly an ugly copy :(
+    if (exists $fox->{fallback}) # mostly an ugly copy :( - incomplete!!!
     {
 
         my $url = $fox->{fallback};
@@ -576,6 +640,7 @@ sub verification_log($$$)
     my $fnumx = sprintf "%04d", $fox->{id};
     my $vlogf = "verification.$fnumx.$vlnumx.$vn.log.html";
 
+    mkdir("dbg") unless -d "dbg";
     open(V, ">dbg/$vlogf") or die "cannot create verification log: $!";
 
     print V "<h2>$fox->{page}</h2>\n";
@@ -834,6 +899,16 @@ sub thread_rebel
             next;
         }
 
+        if ($sline->{k} eq 'let')
+        {
+            my @vx = split(/\s+/, $sline->{v}, 2);
+            my $val = $vx[1];
+
+            $val = process_generators($val);
+
+            $fox->{variables}->{$vx[0]} = $val;
+            LOG "REBEL($fox->{id}:$fox->{line}):LET:VAR($vx[0]=$val)";
+        }
 
         if ($sline->{k} eq 'var' || $sline->{k} =~ /^var\@(\d+)$/)
         {
@@ -1068,50 +1143,27 @@ sub thread_rebel
 
             my $url = $verifyuntillasturl = $sline->{v};
 
-            my $post = undef;
-            my $upload = undef;
-            my $curlf = undef;
-
-            if ($url =~ /^\s*(\S+)\s+POST\s+(\S+)/)
-            {
-                $url = $1;
-                $post = $2;
-            }
-
-            if ($url =~ /^\s*(\S+)\s+UPLOAD\s+(.*)/)
-            {
-                $url = $1;
-                $upload = $2;
-
-            }
-
-
-            $url = $fox->{base}."/$url" unless $url =~ m{^https?://};
-            $url =~ s{([^:])/+}{$1/}g; # remove multiple /////
-
             # setup variables
             for (keys %{$fox->{variables}})
             {
                 my $k = $_;
                 my $v = $fox->{variables}->{$k};
-                $v = uri_escape($v) unless $k =~ /^NOENC:(.*)/;
+                $v = uri_escape($v) unless $k =~ /^(NOENC|DECHTML):(.*)/;
+                $v = decode_entities($v) if $k =~ /^DECHTML:(.*)/;
 
 #               print STDERR "VAR($k = $v)\n";
                 $url =~ s/\Q{$k}\E/$v/g;
-                $post =~ s/\Q{$k}\E/$v/g if $post;
-                $upload =~ s/\Q{$k}\E/$v/g if $upload;
             }
 
             for (keys %def_variables)
             {
                 my $k = $_;
                 my $v = $def_variables{$k};
-                $v = uri_escape($v) unless $k =~ /^NOENC:(.*)/;
+                $v = uri_escape($v) unless $k =~ /^(NOENC|DECHTML):(.*)/;
+                $v = decode_entities($v) if $k =~ /^DECHTML:(.*)/;
 
 #                print STDERR "VAR($k = $v)\n";
                 $url =~ s/\Q{$k}\E/$v/g;
-                $post =~ s/\Q{$k}\E/$v/g if $post;
-                $upload =~ s/\Q{$k}\E/$v/g if $upload;
             }
 
             my $defvpf = $def_variables_per_fox->{$fox->{id}};
@@ -1119,12 +1171,11 @@ sub thread_rebel
             {
                 my $k = $_;
                 my $v = $defvpf->{$k};
-                $v = uri_escape($v) unless $k =~ /^NOENC:(.*)/;
+                $v = uri_escape($v) unless $k =~ /^(NOENC|DECHTML):(.*)/;
+                $v = decode_entities($v) if $k =~ /^DECHTML:(.*)/;
 
 #                print STDERR "VAR($k = $v)\n";
                 $url =~ s/\Q{$k}\E/$v/g;
-                $post =~ s/\Q{$k}\E/$v/g if $post;
-                $upload =~ s/\Q{$k}\E/$v/g if $upload;
             }
 
             for (0..9)
@@ -1142,63 +1193,9 @@ sub thread_rebel
 
 #                print STDERR "VAR($k = $v)\n";
                 $url =~ s/\Q{$k}\E/$v/g;
-                $post =~ s/\Q{$k}\E/$v/g if $post;
-                $upload =~ s/\Q{$k}\E/$v/g if $upload;
             }
 
-            # generators
-            # TODO add them for upload
-            $url  =~ s/{:TEXT\((\d+)\)}/gen_random_text($1)/ge;
-            $post =~ s/{:TEXT\((\d+)\)}/gen_random_text($1)/ge if $post;
-
-            $url  =~ s/{:NUMBER\((\d+),(\d+)\)}/gen_random_number($1,$2)/ge;
-            $post =~ s/{:NUMBER\((\d+),(\d+)\)}/gen_random_number($1,$2)/ge if $post;
-
-            $url  =~ s/{:FIRSTNAME}/gen_firstname()/ge;
-            $post =~ s/{:FIRSTNAME}/gen_firstname()/ge if $post;
-
-            $url  =~ s/{:LASTNAME}/gen_lastname()/ge;
-            $post =~ s/{:LASTNAME}/gen_lastname()/ge if $post;
-
-            $url  =~ s/{:LIST\((\S+)\)}/gen_list($1)/ge;
-            $post =~ s/{:LIST\((\S+)\)}/gen_list($1)/ge if $post;
-
-            $url  =~ s/{:PESEL}/gen_pesel()/ge;
-            $post =~ s/{:PESEL}/gen_pesel()/ge if $post;
-
-            $url  =~ s/{:DATE_FROM_LAST_PESEL}/gen_date_from_last_pesel()/ge;
-            $post =~ s/{:DATE_FROM_LAST_PESEL}/gen_date_from_last_pesel()/ge if $post;
-
-            $url  =~ s/{:VIN}/gen_vin()/ge;
-            $post =~ s/{:VIN}/gen_vin()/ge if $post;
-
-            $url  =~ s/{:ZIPCODE}/gen_zipcode()/ge;
-            $post =~ s/{:ZIPCODE}/gen_zipcode()/ge if $post;
-
-            $url  =~ s/{:CITY}/gen_city()/ge;
-            $post =~ s/{:CITY}/gen_city()/ge if $post;
-
-            $url  =~ s/{:EMAIL}/gen_email()/ge;
-            $post =~ s/{:EMAIL}/gen_email()/ge if $post;
-
-            $url  =~ s/{:DOWOD}/gen_dowod()/ge;
-            $post =~ s/{:DOWOD}/gen_dowod()/ge if $post;
-
-            my $v = uri_escape(strftime("%F", localtime));
-            $url =~ s/{:DATE}/$v/g;
-            $post =~ s/{:DATE}/$v/g if $post;
-
-            $v = uri_escape(strftime("%T", localtime));
-            $url =~ s/{:TIME}/$v/g;
-            $post =~ s/{:TIME}/$v/g if $post;
-
-            $v = uri_escape(strftime("%F %T", localtime));
-            $url =~ s/{:DATETIME}/$v/g;
-            $post =~ s/{:DATETIME}/$v/g if $post;
-
-            $v = time();
-            $url =~ s/{:UNIXTIME}/$v/g;
-            $post =~ s/{:UNIXTIME}/$v/g if $post;
+            $url = process_generators($url);
 
 # TODO commented out in leader.pl too...
 #             # multivariables
@@ -1210,6 +1207,54 @@ sub thread_rebel
 #                 $url =~ s/\Q{$k}\E/$v/g;
 #                 $post =~ s/\Q{$k}\E/$v/g if $post;
 #             }
+
+
+            my $post = undef;
+            my $postfile = undef;
+            my $postraw = undef;
+            my $upload = undef;
+            my $curlf = undef;
+
+            my $add_headers_h = undef;
+
+            while ($url =~ /^\s*(.*)\s+HEADER\((.*?)\)\s*$/)
+            {
+                $url = $1;
+                my $addhdrx = $2;
+                $addhdrx =~ /(\S+):\s*(.*)/;
+                $add_headers_h->{$1} = $2;
+
+                # MSG "hdr($1)=($2)";
+            }
+
+            if ($url =~ /^\s*(\S+)\s+POST\s+(\S+)/)
+            {
+                $url = $1;
+                $post = $2;
+            }
+
+            if ($url =~ /^\s*(\S+)\s+UPLOAD\s+(.*)/)
+            {
+                $url = $1;
+                $upload = $2;
+            }
+
+            if ($url =~ /^\s*(\S+)\s+POSTFILE\s+(.*)/)
+            {
+                $url = $1;
+                $postfile = $2;
+            }
+
+            if ($url =~ /^\s*(\S+)\s+POSTRAW\s+(.*)/)
+            {
+                $url = $1;
+                $postraw = $2;
+            }
+
+
+            $url = $fox->{base}."/$url" unless $url =~ m{^https?://};
+            $url =~ s{([^:])/+}{$1/}g; # remove multiple /////
+
 
             my $bulk = 0;
             # burl cache
@@ -1229,6 +1274,8 @@ sub thread_rebel
             $fox->{url} = $url;
             $fox->{post} = $post; # just to remember
             $fox->{upload} = $upload; # just to remember
+            $fox->{postfile} = $postfile; # just to remember
+            $fox->{postraw} = $postraw; # just to remember
 
             if ($bulk)
             {
@@ -1254,6 +1301,41 @@ sub thread_rebel
             {
                 $curl->setopt(CURLOPT_POST, 1);
                 $curl->setopt(CURLOPT_COPYPOSTFIELDS, $post);
+                $curl->setopt(CURLOPT_READDATA, undef);
+            }
+
+            if ($postfile)
+            {
+                $curl->setopt(CURLOPT_POST, 1);
+                my @upfields = split/\s+/, $postfile, 2;
+                my $f = $upfields[0];
+                my $slug = $upfields[1];
+                my $mt = check_mime($f);
+                $add_headers_h->{'Content-Type'} = $mt; # 'Transfer-Encoding: chunked'?
+                $add_headers_h->{Slug} = $slug;
+
+                # didn't work :(
+                #                
+                my $ofile;
+                open($ofile, "<", $f) or die($!);
+                $curl->setopt(CURLOPT_READDATA, $ofile);
+                $curl->setopt(CURLOPT_COPYPOSTFIELDS, undef); 
+                $curl->setopt(CURLOPT_POSTFIELDS, undef); 
+#                $curl->setopt(CURLOPT_COPYPOSTFIELDS, read_file($ofile)); 
+            }
+
+            if ($postraw)
+            {
+                $curl->setopt(CURLOPT_POST, 1);
+                my @upfields = split/\s+/, $postraw, 2;
+                my $ct = $upfields[0];
+                # $global_rawpost_data = $upfields[1];
+                $add_headers_h->{'Content-Type'} = $ct; # 'Transfer-Encoding: chunked'?
+
+                $curl->setopt(CURLOPT_COPYPOSTFIELDS, $upfields[1]);
+                $curl->setopt(CURLOPT_READDATA, undef);
+                
+                # $curl->setopt(CURLOPT_READFUNCTION, sub { return $global_rawpost_data; })
             }
 
             if ($upload)
@@ -1266,8 +1348,7 @@ sub thread_rebel
                     my $b = shift @upfields;
                     if (-f $b)
                     {
-                        my $mt = `file --mime-type '$b'` || 'text/plain';
-                        chomp $mt;
+                        my $mt = check_mime($b);
                         $curlf->formaddfile($b, $a, $mt);
                         MSG "UPLOAD($a -> $b [$mt])";
                     }
@@ -1280,10 +1361,33 @@ sub thread_rebel
                 
                 $curl->setopt(CURLOPT_POST, 1);
                 $curl->setopt(CURLOPT_HTTPPOST, $curlf);
-
             }
 
-            $curl->setopt(CURLOPT_HTTPHEADER, \@def_headers);
+            if (defined $add_headers_h) # merge default headers with additonal
+            {
+                my $allh;
+
+                for my $k (keys %$def_headers_h)
+                {
+                    $allh->{$k} = $def_headers_h->{$k};
+                }
+
+                for my $k (keys %$add_headers_h)
+                {
+                    $allh->{$k} = $add_headers_h->{$k};
+                }
+
+                my @allharr = ();
+                for my $k (keys %$allh)
+                {
+                    push(@allharr, "$k: ".$allh->{$k});
+                }
+                $curl->setopt(CURLOPT_HTTPHEADER, \@allharr);
+            }
+            else # usually we can use the deafults
+            {
+                $curl->setopt(CURLOPT_HTTPHEADER, \@def_headers);
+            }
 
             #my $curl_errorstr;
             #$curl->setopt(CURLOPT_ERRORBUFFER, $curl_errorstr);
@@ -1424,7 +1528,10 @@ while (<C>)
 
     if (/^header\s*=\s*(.+)/)
     {
-        push(@def_headers, $1);
+        my $hh = $1;
+        push(@def_headers, $hh);
+        $hh =~ /(\S+):\s*(.*)/;
+        $def_headers_h->{$1} = $2;
         next;
     }
 
@@ -1465,16 +1572,19 @@ while (<C>)
         next;
     }
 
-    if (/^varlist\s*=\s*(\S+)\s+(\S+)/)
+    if (/^varlist\s*=\s*(\S+)\s+(\S+)/) # it's global, we read it now
     {
         my $vln = $1;
+        my $vlf = $2;
         $queues_varlist->{$vln} = Thread::Queue->new();
-        open(VL, $2);
+        LOG "VARLIST($vln) from [$vlf]";
+        open(VL, $vlf);
         while (<VL>)
         {
             chomp;
             next if /^#/;
             next if /^\s*$/;
+            LOG "VARLIST($vln) insert($_)";
             $queues_varlist->{$vln}->enqueue($_);
         }
         close(VL);
